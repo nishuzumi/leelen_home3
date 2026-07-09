@@ -8,6 +8,7 @@ CONF_ACCOUNT_ID = "accountId"
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
 CONF_ACCESS_TOKEN = "accessToken"
+CONF_REFRESH_TOKEN = "refreshToken"
 CONF_GATEWAY_IP = "gateway_ip"
 CONF_GROUP_ID = "groupId"
 

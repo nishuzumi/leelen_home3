@@ -3,7 +3,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, SUPPORTED_PLATFORMS, CONF_DEVICE_ADDR, CONF_USERNAME, CONF_ACCESS_TOKEN, CONF_GROUP_ID
+from .const import DOMAIN, SUPPORTED_PLATFORMS, CONF_DEVICE_ADDR, CONF_USERNAME, CONF_ACCESS_TOKEN, CONF_REFRESH_TOKEN, CONF_GROUP_ID
 from .coordinator import LeelenCoordinator
 from .leelen.api.HttpApi import HttpApi
 from .leelen.utils.LogUtils import LogUtils
@@ -26,7 +26,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     api.device_addr = entry.data.get(CONF_DEVICE_ADDR, "")
     api.username = entry.data.get(CONF_USERNAME, "")
     api._access_token = entry.data.get(CONF_ACCESS_TOKEN, "")
+    api._refresh_token = entry.data.get(CONF_REFRESH_TOKEN, "")
     api._group_id = entry.data.get(CONF_GROUP_ID, "")
+    # 恢复保存的内部账号密码，用于 token 过期自动刷新
+    api._saved_username = entry.data.get(CONF_USERNAME, "")
+    api._saved_password = entry.data.get(CONF_PASSWORD, "")
 
 
 

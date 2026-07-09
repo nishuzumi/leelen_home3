@@ -39,7 +39,10 @@ class HttpApi:
         self._hass = hass
         self._device_list = []
         self._access_token = ""
+        self._refresh_token = ""
         self._group_id = ""
+        self._saved_username = ""
+        self._saved_password = ""
 
     def get_secret(self, num: int) -> str:
         chars = string.ascii_letters + string.digits
@@ -55,6 +58,63 @@ class HttpApi:
 
     def get_terminal_id(self):
         return hashlib.md5(''.join(random.choices(string.ascii_letters + string.digits, k=32)).encode()).hexdigest()
+
+    async def _refresh_token(self):
+        """优先使用refreshToken刷新，失败则用账号密码重新登录"""
+        # 方式一：用 refreshToken 刷新（轻量）
+        if self._refresh_token:
+            try:
+                url = f"{self.BASE_URL}/rest/app/community/security/refreshToken"
+                session = async_get_clientsession(self._hass)
+                params = {
+                    "accessToken": self._access_token,
+                    "refreshToken": self._refresh_token
+                }
+                async with session.post(
+                    url,
+                    verify_ssl=False,
+                    json={
+                        "params": params,
+                        "seq": 65,
+                        "version": "V1.0"
+                    },
+                ) as res:
+                    res.raise_for_status()
+                    data = await res.json(encoding="utf-8")
+                    LogUtils.d("HttpApi", f"refreshToken 返回: {data}")
+                    if data.get("result") == 1:
+                        p = data.get("params", {})
+                        new_token = p.get("accessToken")
+                        new_refresh = p.get("refreshToken")
+                        if new_token:
+                            self._access_token = new_token
+                            if new_refresh:
+                                self._refresh_token = new_refresh
+                            LogUtils.d("HttpApi", "token刷新成功(refreshToken方式)")
+                            return True
+            except Exception as e:
+                LogUtils.e(f"refreshToken方式失败: {e}")
+
+        # 方式二：用保存的内部账号密码重新登录（兜底）
+        if self._saved_username and self._saved_password:
+            try:
+                uuid = await self.get_uuid()
+                result = await self.login(self._saved_username, self._saved_password, uuid)
+                if result.get("result") == 1:
+                    p = result.get("params", {})
+                    new_token = p.get("accessToken")
+                    if new_token:
+                        self._access_token = new_token
+                        new_refresh = p.get("refreshToken")
+                        if new_refresh:
+                            self._refresh_token = new_refresh
+                        LogUtils.d("HttpApi", "token刷新成功(账号密码方式)")
+                        return True
+                LogUtils.e(f"token刷新失败(账号密码): {result}")
+            except Exception as e:
+                LogUtils.e(f"token刷新异常(账号密码): {e}")
+
+        return False
 
     async def _make_request(self, url, params, seq, version="V1.0"):
         session = async_get_clientsession(self._hass)
@@ -75,6 +135,30 @@ class HttpApi:
             res.raise_for_status()
             res_dict = await res.json(encoding="utf-8")
             LogUtils.d("HttpApi", f"请求: {url} params={params} seq={seq} version={version} 返回: {res_dict}")
+
+            # token 过期（10001），自动刷新并重试
+            if res_dict.get("result") == 10001 and self._saved_username and self._saved_password:
+                LogUtils.d("HttpApi", "token已过期，尝试刷新token...")
+                refresh_ok = await self._refresh_token()
+                if refresh_ok:
+                    headers["Authorization"] = f"Bearer {self._access_token}"
+                    async with session.post(
+                        url,
+                        verify_ssl=False,
+                        headers=headers,
+                        json={
+                            "params": params,
+                            "seq": seq,
+                            "version": version
+                        },
+                    ) as res2:
+                        res2.raise_for_status()
+                        res_dict2 = await res2.json(encoding="utf-8")
+                        LogUtils.d("HttpApi", f"token刷新后重试: {url} 返回: {res_dict2}")
+                        return res_dict2
+                else:
+                    LogUtils.e("token刷新失败，无法重试请求")
+
             return res_dict
 
     async def get_user(self, accessToken):
@@ -330,6 +414,10 @@ class HttpApi:
         code_login_result = await self.verifyCodeLogin(self.username, verifyCode, self.verifyCodeSign, self.uuid)
         accessToken = code_login_result.get("params", {}).get("accessToken")
         self._access_token = accessToken
+        # 验证码登录也可能返回 refreshToken
+        refresh_token = code_login_result.get("params", {}).get("refreshToken")
+        if refresh_token:
+            self._refresh_token = refresh_token
         user_data = await self.get_user(accessToken)
         username = user_data.get("params", {}).get("userName")
         password = user_data.get("params", {}).get("password")
@@ -355,12 +443,17 @@ class HttpApi:
         else:
             deviceAddr = None
 
+        # 保存内部账号密码，用于 token 过期后重新登录
+        self._saved_username = username
+        self._saved_password = password
+
         return {
             "username": username,
             "password": password,
             "deviceAddr": deviceAddr,
             "accountId": accountId,
             "accessToken": accessToken,
+            "refreshToken": self._refresh_token,
             "groupId": self._group_id,
             "groupName": group_name
         }
