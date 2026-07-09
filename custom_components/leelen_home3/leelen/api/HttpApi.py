@@ -59,60 +59,43 @@ class HttpApi:
     def get_terminal_id(self):
         return hashlib.md5(''.join(random.choices(string.ascii_letters + string.digits, k=32)).encode()).hexdigest()
 
-    async def _refresh_token(self):
-        """优先使用refreshToken刷新，失败则用账号密码重新登录"""
-        # 方式一：用 refreshToken 刷新（轻量）
-        if self._refresh_token:
-            try:
-                url = f"{self.BASE_URL}/rest/app/community/security/refreshToken"
-                session = async_get_clientsession(self._hass)
-                params = {
-                    "accessToken": self._access_token,
-                    "refreshToken": self._refresh_token
-                }
-                async with session.post(
-                    url,
-                    verify_ssl=False,
-                    json={
-                        "params": params,
-                        "seq": 65,
-                        "version": "V1.0"
-                    },
-                ) as res:
-                    res.raise_for_status()
-                    data = await res.json(encoding="utf-8")
-                    LogUtils.d("HttpApi", f"refreshToken 返回: {data}")
-                    if data.get("result") == 1:
-                        p = data.get("params", {})
-                        new_token = p.get("accessToken")
-                        new_refresh = p.get("refreshToken")
-                        if new_token:
-                            self._access_token = new_token
-                            if new_refresh:
-                                self._refresh_token = new_refresh
-                            LogUtils.d("HttpApi", "token刷新成功(refreshToken方式)")
-                            return True
-            except Exception as e:
-                LogUtils.e(f"refreshToken方式失败: {e}")
+    async def _do_refresh_token(self):
+        """用 refreshToken 刷新 accessToken"""
+        if not self._refresh_token:
+            LogUtils.e("无 refreshToken，无法刷新")
+            return False
 
-        # 方式二：用保存的内部账号密码重新登录（兜底）
-        if self._saved_username and self._saved_password:
-            try:
-                uuid = await self.get_uuid()
-                result = await self.login(self._saved_username, self._saved_password, uuid)
-                if result.get("result") == 1:
-                    p = result.get("params", {})
+        try:
+            url = f"{self.BASE_URL}/rest/app/community/security/refreshToken"
+            session = async_get_clientsession(self._hass)
+            params = {
+                "accessToken": self._access_token,
+                "refreshToken": self._refresh_token
+            }
+            async with session.post(
+                url,
+                verify_ssl=False,
+                json={
+                    "params": params,
+                    "seq": 65,
+                    "version": "V1.0"
+                },
+            ) as res:
+                res.raise_for_status()
+                data = await res.json(encoding="utf-8")
+                LogUtils.d("HttpApi", f"refreshToken 返回: {data}")
+                if data.get("result") == 1:
+                    p = data.get("params", {})
                     new_token = p.get("accessToken")
+                    new_refresh = p.get("refreshToken")
                     if new_token:
                         self._access_token = new_token
-                        new_refresh = p.get("refreshToken")
                         if new_refresh:
                             self._refresh_token = new_refresh
-                        LogUtils.d("HttpApi", "token刷新成功(账号密码方式)")
+                        LogUtils.d("HttpApi", "token刷新成功(refreshToken方式)")
                         return True
-                LogUtils.e(f"token刷新失败(账号密码): {result}")
-            except Exception as e:
-                LogUtils.e(f"token刷新异常(账号密码): {e}")
+        except Exception as e:
+            LogUtils.e(f"refreshToken方式失败: {e}")
 
         return False
 
@@ -137,9 +120,9 @@ class HttpApi:
             LogUtils.d("HttpApi", f"请求: {url} params={params} seq={seq} version={version} 返回: {res_dict}")
 
             # token 过期（10001），自动刷新并重试
-            if res_dict.get("result") == 10001 and self._saved_username and self._saved_password:
+            if res_dict.get("result") == 10001 and self._refresh_token:
                 LogUtils.d("HttpApi", "token已过期，尝试刷新token...")
-                refresh_ok = await self._refresh_token()
+                refresh_ok = await self._do_refresh_token()
                 if refresh_ok:
                     headers["Authorization"] = f"Bearer {self._access_token}"
                     async with session.post(
@@ -412,17 +395,26 @@ class HttpApi:
     async def code_login(self, verifyCode):
         self.uuid = await self.get_uuid()
         code_login_result = await self.verifyCodeLogin(self.username, verifyCode, self.verifyCodeSign, self.uuid)
+        LogUtils.d("HttpApi", f"verifyCodeLogin 响应: {code_login_result}")
         accessToken = code_login_result.get("params", {}).get("accessToken")
         self._access_token = accessToken
         # 验证码登录也可能返回 refreshToken
         refresh_token = code_login_result.get("params", {}).get("refreshToken")
         if refresh_token:
             self._refresh_token = refresh_token
+            LogUtils.d("HttpApi", "从 verifyCodeLogin 获取到 refreshToken")
         user_data = await self.get_user(accessToken)
         username = user_data.get("params", {}).get("userName")
         password = user_data.get("params", {}).get("password")
 
         third_result = await self.third_login(username, password)
+        LogUtils.d("HttpApi", f"third_login 响应: {third_result}")
+        # 如果 verifyCodeLogin 没给 refreshToken，试试从 third_login 拿
+        if not self._refresh_token:
+            rt = third_result.get("refreshToken") or third_result.get("token") or third_result.get("accessToken")
+            if rt:
+                self._refresh_token = rt
+                LogUtils.d("HttpApi", "从 third_login 获取到 refreshToken")
         bindCallers = third_result.get("bindCallers")
         accountId = third_result.get("accountId")
         LogUtils.d("third_result", third_result)

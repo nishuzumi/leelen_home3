@@ -2,8 +2,9 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN, SUPPORTED_PLATFORMS, CONF_DEVICE_ADDR, CONF_USERNAME, CONF_ACCESS_TOKEN, CONF_REFRESH_TOKEN, CONF_GROUP_ID
+from .const import DOMAIN, SUPPORTED_PLATFORMS, CONF_DEVICE_ADDR, CONF_USERNAME, CONF_PASSWORD, CONF_ACCESS_TOKEN, CONF_REFRESH_TOKEN, CONF_GROUP_ID
 from .coordinator import LeelenCoordinator
 from .leelen.api.HttpApi import HttpApi
 from .leelen.utils.LogUtils import LogUtils
@@ -12,6 +13,11 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    # 老配置没有 refreshToken，提示用户删除重新添加
+    if not entry.data.get(CONF_REFRESH_TOKEN):
+        raise ConfigEntryNotReady(
+            "配置已过期，缺少 refreshToken。请删除此集成后重新添加（设置 → 设备与服务 → 集成 → 立林3.0 → 删除）"
+        )
     hass.data.setdefault(DOMAIN, {})
     LogUtils.d(__name__, f"开始设置集成, domain={DOMAIN}")
     LogUtils.d(__name__, f"entry.data: {entry.data}")
@@ -28,12 +34,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     api._access_token = entry.data.get(CONF_ACCESS_TOKEN, "")
     api._refresh_token = entry.data.get(CONF_REFRESH_TOKEN, "")
     api._group_id = entry.data.get(CONF_GROUP_ID, "")
-    # 恢复保存的内部账号密码，用于 token 过期自动刷新
-    api._saved_username = entry.data.get(CONF_USERNAME, "")
-    api._saved_password = entry.data.get(CONF_PASSWORD, "")
-
-
-
 
     LogUtils.d(__name__, f"API实例: {api}")
     LogUtils.d(__name__, f"api._group_id: {api._group_id if hasattr(api, '_group_id') else 'N/A'}")
@@ -47,12 +47,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as e:
         LogUtils.e(f"获取设备列表异常: {e}")
         all_devices = []
-
-    # try:
-    #     all_devices = await api.get_online_status(all_devices)
-    #     LogUtils.d(__name__, f"get_online_status 后设备数: {len(all_devices)}")
-    # except Exception as e:
-    #     LogUtils.e(f"获取在线状态异常: {e}")
 
     hass.data[DOMAIN]['devices'][entry.entry_id] = all_devices
     LogUtils.d(__name__, f"已保存设备列表到 hass.data[{DOMAIN}]['devices'][{entry.entry_id}]")
@@ -92,8 +86,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if entry.entry_id in hass.data[DOMAIN]:
         data = hass.data[DOMAIN].pop(entry.entry_id)
         coordinator = data.get("coordinator")
-        # if coordinator:
-        #     coordinator.stop()
         LogUtils.d(__name__, f"已卸载配置项: {entry.entry_id}")
 
     if entry.entry_id in hass.data[DOMAIN].get('devices', {}):
