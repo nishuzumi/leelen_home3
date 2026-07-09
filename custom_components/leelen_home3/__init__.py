@@ -65,6 +65,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     coordinator = LeelenCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
+    await coordinator.async_start_timer()
 
     hass.data[DOMAIN][entry.entry_id] = {
         "coordinator": coordinator,
@@ -86,6 +87,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if entry.entry_id in hass.data[DOMAIN]:
         data = hass.data[DOMAIN].pop(entry.entry_id)
         coordinator = data.get("coordinator")
+        if coordinator:
+            await coordinator.async_stop_timer()
         LogUtils.d(__name__, f"已卸载配置项: {entry.entry_id}")
 
     if entry.entry_id in hass.data[DOMAIN].get('devices', {}):
