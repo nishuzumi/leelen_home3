@@ -2,7 +2,9 @@
   "config": {
     "abort": {
       "already_configured": "该手机号已配置",
-      "refresh_success": "设备列表已成功刷新"
+      "refresh_success": "设备列表已成功刷新",
+      "reauth_successful": "重新认证成功，Token 已更新",
+      "reauth_no_phone": "配置中未找到手机号，请删除集成后重新添加"
     },
     "error": {
       "invalid_phone": "请输入有效的11位手机号",
@@ -21,6 +23,17 @@
       "verify": {
         "title": "验证码登录",
         "description": "请输入短信验证码",
+        "data": {
+          "code": "验证码"
+        }
+      },
+      "reauth": {
+        "title": "重新认证",
+        "description": "验证码将发送到 {phone}，确认后发送"
+      },
+      "reauth_confirm": {
+        "title": "重新认证",
+        "description": "请输入发送到 {phone} 的短信验证码",
         "data": {
           "code": "验证码"
         }

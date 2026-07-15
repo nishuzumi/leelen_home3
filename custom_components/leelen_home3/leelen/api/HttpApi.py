@@ -14,6 +14,7 @@ import aiohttp
 import aiosqlite
 from aiohttp import ClientError
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from ..entity.BaseParam import BaseParam, CodeLoginRequestParam, GetVerifyCodeRequestParam
@@ -41,8 +42,7 @@ class HttpApi:
         self._access_token = ""
         self._refresh_token = ""
         self._group_id = ""
-        self._saved_username = ""
-        self._saved_password = ""
+        self._entry_id = None
 
     def get_secret(self, num: int) -> str:
         chars = string.ascii_letters + string.digits
@@ -92,12 +92,38 @@ class HttpApi:
                         self._access_token = new_token
                         if new_refresh:
                             self._refresh_token = new_refresh
+                        # 持久化保存新 token，防止重启后使用旧 token
+                        await self._persist_tokens()
                         LogUtils.d("HttpApi", "token刷新成功(refreshToken方式)")
                         return True
+                elif data.get("result") == 10002:
+                    LogUtils.e("refreshToken 已过期，触发重新认证")
+                    raise ConfigEntryAuthFailed(
+                        "refreshToken 已过期，请重新验证码登录"
+                    )
+        except ConfigEntryAuthFailed:
+            raise
         except Exception as e:
             LogUtils.e(f"refreshToken方式失败: {e}")
 
         return False
+
+    async def _persist_tokens(self):
+        """将最新的 token 保存到 config entry，重启后不会丢失。"""
+        if not self._hass or not self._entry_id:
+            return
+        entry = self._hass.config_entries.async_get_entry(self._entry_id)
+        if not entry:
+            return
+        self._hass.config_entries.async_update_entry(
+            entry,
+            data={
+                **entry.data,
+                "accessToken": self._access_token,
+                "refreshToken": self._refresh_token,
+            }
+        )
+        LogUtils.d("HttpApi", "token 已持久化保存到 config entry")
 
     async def _make_request(self, url, params, seq, version="V1.0"):
         session = async_get_clientsession(self._hass)
@@ -415,6 +441,12 @@ class HttpApi:
             if rt:
                 self._refresh_token = rt
                 LogUtils.d("HttpApi", "从 third_login 获取到 refreshToken")
+        else:
+            # 已经有 refreshToken 了（可能是老的），但也从 third_login 拿一份新的覆盖
+            third_rt = third_result.get("refreshToken") or third_result.get("token") or third_result.get("accessToken")
+            if third_rt:
+                self._refresh_token = third_rt
+                LogUtils.d("HttpApi", "从 third_login 覆盖 refreshToken")
         bindCallers = third_result.get("bindCallers")
         accountId = third_result.get("accountId")
         LogUtils.d("third_result", third_result)

@@ -2,7 +2,7 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
 from .const import DOMAIN, SUPPORTED_PLATFORMS, CONF_DEVICE_ADDR, CONF_USERNAME, CONF_PASSWORD, CONF_ACCESS_TOKEN, CONF_REFRESH_TOKEN, CONF_GROUP_ID
 from .coordinator import LeelenCoordinator
@@ -29,6 +29,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN]['entities'][platform] = []
 
     api = HttpApi.get_instance(hass)
+    api._entry_id = entry.entry_id
     api.device_addr = entry.data.get(CONF_DEVICE_ADDR, "")
     api.username = entry.data.get(CONF_USERNAME, "")
     api._access_token = entry.data.get(CONF_ACCESS_TOKEN, "")
@@ -44,6 +45,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if all_devices is None:
             all_devices = []
             LogUtils.d(__name__, "设备列表为 None，已转换为空列表")
+    except ConfigEntryAuthFailed:
+        raise
     except Exception as e:
         LogUtils.e(f"获取设备列表异常: {e}")
         all_devices = []

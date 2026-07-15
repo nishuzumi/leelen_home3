@@ -12,7 +12,7 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .const import DOMAIN, OPTIONS_SELECT, CONF_PHONE, CONF_DEVICE_ADDR, OPTIONS_CONFIG
+from .const import DOMAIN, OPTIONS_SELECT, CONF_PHONE, CONF_DEVICE_ADDR, OPTIONS_CONFIG, CONF_ACCESS_TOKEN, CONF_REFRESH_TOKEN, CONF_GROUP_ID, CONF_USERNAME, CONF_PASSWORD
 from .leelen.api.HttpApi import HttpApi
 from .leelen.utils.LogUtils import LogUtils
 
@@ -92,6 +92,87 @@ class LeelenIntegrationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }),
             errors=errors,
             description_placeholders={"desc": "输入短信验证码"},
+        )
+
+    async def async_step_reauth(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """刷新令牌过期，触发重新认证。"""
+        entry = self._get_reauth_entry()
+        phone = entry.data.get(CONF_PHONE, "")
+        if not phone:
+            return self.async_abort(reason="reauth_no_phone")
+
+        # HA reauth 初始调用会把 entry.data 作为 user_input 传入（含 accessToken）
+        # 此时显示确认页；用户提交空表单后才是真正的确认操作
+        if user_input is None or "accessToken" in user_input:
+            return self.async_show_form(
+                step_id="reauth",
+                data_schema=vol.Schema({}),
+                description_placeholders={"phone": phone},
+            )
+
+        # 用户点击确认，发送验证码
+        try:
+            data = await HttpApi.get_instance(self.hass).VerifyCode(phone)
+            if data.get("result") == 10026:
+                return self.async_show_form(
+                    step_id="reauth",
+                    data_schema=vol.Schema({}),
+                    errors={"base": "sms_rate_limit"},
+                    description_placeholders={"phone": phone},
+                )
+            _LOGGER.info("验证码已发送到: %s", phone)
+        except Exception as exc:
+            _LOGGER.exception("发送验证码失败")
+            return self.async_show_form(
+                step_id="reauth",
+                data_schema=vol.Schema({}),
+                errors={"base": str(exc)},
+                description_placeholders={"phone": phone},
+            )
+
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        errors: dict[str, str] = {}
+        entry = self._get_reauth_entry()
+        phone = entry.data.get(CONF_PHONE, "")
+
+        if user_input is not None:
+            code = user_input.get("code", "").strip()
+            try:
+                result = await HttpApi.get_instance(self.hass).code_login(code)
+                if result:
+                    result[CONF_PHONE] = phone
+                    # 更新配置数据，保留原有数据并覆盖新 token
+                    self.hass.config_entries.async_update_entry(
+                        entry,
+                        data={
+                            **entry.data,
+                            "accessToken": result.get("accessToken"),
+                            "refreshToken": result.get("refreshToken"),
+                            "username": result.get("username"),
+                            "password": result.get("password"),
+                            "deviceAddr": result.get("deviceAddr"),
+                            "accountId": result.get("accountId"),
+                            "groupId": result.get("groupId"),
+                            "groupName": result.get("groupName"),
+                        },
+                        title=f"家庭组：{result.get('groupName', '我的家')}({phone})",
+                    )
+                    LogUtils.d("config_flow", "重新认证成功，token 已更新")
+                    return self.async_abort(reason="reauth_successful")
+                errors["code"] = "invalid_code"
+            except Exception as exc:
+                _LOGGER.exception("重新认证失败")
+                errors["code"] = f"reauth_failed: {exc}"
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({
+                vol.Required("code"): str,
+            }),
+            errors=errors,
+            description_placeholders={"phone": phone},
         )
 
     @staticmethod
