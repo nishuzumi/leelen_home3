@@ -41,35 +41,6 @@ class LeelenCoordinator(DataUpdateCoordinator):
 
             self._data = {"devices": devices}
 
-            for device in devices:
-                for logic_srv in device.get("logic_srv", []):
-                    did = device.get("dev_addr")
-                    fiid = logic_srv.get("fiid")
-                    siid = device.get("siid")
-                    direct_did = device.get("direct_did")
-
-                    if not all([did, fiid, siid, direct_did]):
-                        continue
-
-                    try:
-                        result = await api.read_dids_fiids(
-                            did=did,
-                            direct_did=direct_did,
-                            fiids=[fiid],
-                            siid=siid
-                        )
-
-                        if result.get("result") == 1:
-                            params = result.get("params", [])
-                            if params:
-                                fiids_data = params[0].get("fiids", [])
-                                if fiids_data:
-                                    value = fiids_data[0].get("value")
-                                    key = f"{did}_{fiid}"
-                                    self._data[key] = value
-                    except Exception as e:
-                        _LOGGER.error(f"更新设备 {did} 状态失败: {e}")
-
             _LOGGER.debug(f"=== 心跳更新完成，{len(devices)} 个设备 ===")
             return self._data
         except Exception as e:

@@ -4,7 +4,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
-from .const import DOMAIN, SUPPORTED_PLATFORMS, CONF_DEVICE_ADDR, CONF_USERNAME, CONF_PASSWORD, CONF_ACCESS_TOKEN, CONF_REFRESH_TOKEN, CONF_GROUP_ID
+from .const import DOMAIN, SUPPORTED_PLATFORMS, CONF_DEVICE_ADDR, CONF_USERNAME, CONF_ACCESS_TOKEN, CONF_REFRESH_TOKEN, CONF_GROUP_ID
 from .coordinator import LeelenCoordinator
 from .leelen.api.HttpApi import HttpApi
 from .leelen.utils.LogUtils import LogUtils
@@ -20,7 +20,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
     hass.data.setdefault(DOMAIN, {})
     LogUtils.d(__name__, f"开始设置集成, domain={DOMAIN}")
-    LogUtils.d(__name__, f"entry.data: {entry.data}")
 
     hass.data[DOMAIN].setdefault('devices', {})
     hass.data[DOMAIN].setdefault('entities', {})
@@ -64,11 +63,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         online_status = "在线" if is_online else "离线"
         LogUtils.d(__name__, f"设备: {dev_name} ({dev_addr}), profile_id={profile_id}, 服务数量: {len(logic_srvs)}, 状态: {online_status}")
         for srv in logic_srvs:
-            LogUtils.d(__name__, f"  - 服务: fiid={srv.get('fiid')}, siid={device.get('siid')}")
+            LogUtils.d(
+                __name__,
+                f"  - 服务: service_type={srv.get('service_type')}, siid={srv.get('siid')}",
+            )
 
     coordinator = LeelenCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
-    await coordinator.async_start_timer()
 
     hass.data[DOMAIN][entry.entry_id] = {
         "coordinator": coordinator,
