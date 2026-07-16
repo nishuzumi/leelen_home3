@@ -10,9 +10,9 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import device_registry as dr, entity_registry as er
-from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .const import DOMAIN, OPTIONS_SELECT, CONF_PHONE, CONF_DEVICE_ADDR, OPTIONS_CONFIG, CONF_ACCESS_TOKEN, CONF_REFRESH_TOKEN, CONF_GROUP_ID, CONF_USERNAME, CONF_PASSWORD
+from .const import DOMAIN, CONF_PHONE, OPTIONS_CONFIG
+from .device_catalog import PLATFORM_SERVICE_TYPES, entity_unique_id, iter_platform_services
 from .leelen.api.HttpApi import HttpApi
 from .leelen.utils.LogUtils import LogUtils
 
@@ -46,7 +46,7 @@ class LeelenIntegrationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if data.get("result") == 10026:
                     errors["phone"] = "sms_rate_limit"
                 else:
-                    _LOGGER.info("验证码已发送到: %s", phone)
+                    _LOGGER.info("验证码已发送")
                     return await self.async_step_verify()
             except Exception as exc:
                 _LOGGER.exception("发送验证码失败")
@@ -75,7 +75,7 @@ class LeelenIntegrationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     result[CONF_PHONE] = self._phone
                     # device_addr = result.get(CONF_DEVICE_ADDR)
                     group_name = result.get("groupName", "我的家")
-                    _LOGGER.info("登录成功: %s", self._phone)
+                    _LOGGER.info("登录成功")
                     return self.async_create_entry(
                         title=f"家庭组：{group_name}({self._phone})",
                         data=result,
@@ -120,7 +120,7 @@ class LeelenIntegrationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors={"base": "sms_rate_limit"},
                     description_placeholders={"phone": phone},
                 )
-            _LOGGER.info("验证码已发送到: %s", phone)
+            _LOGGER.info("验证码已发送")
         except Exception as exc:
             _LOGGER.exception("发送验证码失败")
             return self.async_show_form(
@@ -206,15 +206,21 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             self.hass.data[DOMAIN]["devices"][self._entry_id] = all_devices
 
             all_entities = {
-                f"leelen_{device.get('dev_addr')}_{srv.get('fiid')}"
-                for device in all_devices
-                for srv in device.get("logic_srv", [])
+                entity_unique_id(device, service, platform)
+                for platform in PLATFORM_SERVICE_TYPES
+                for device, service in iter_platform_services(all_devices, platform)
             }
 
             current_device_ids = {str(device.get("dev_addr")) for device in all_devices}
 
             entity_registry = er.async_get(self.hass)
             device_registry = dr.async_get(self.hass)
+            current_entities = {
+                registry_entry.unique_id
+                for registry_entry in entity_registry.entities.values()
+                if registry_entry.config_entry_id == self._entry_id
+            }
+            new_entities = all_entities - current_entities
 
             removed = 0
             for dev in list(device_registry.devices.values()):
@@ -237,11 +243,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     entity_registry.async_remove(entry.entity_id)
                     removed_entities += 1
 
+            await self.hass.config_entries.async_reload(self._entry_id)
 
-            added = len(all_entities)
             self._refresh_stats = {
                 "total": str(len(all_devices)),
-                "added": str(added),
+                "added": str(len(new_entities)),
                 "removed": str(removed),
                 "removed_entities": str(removed_entities)
             }

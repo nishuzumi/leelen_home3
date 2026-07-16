@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 
 from homeassistant.components.fan import FanEntity, FanEntityFeature
@@ -7,6 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 
 from .const import DOMAIN
+from .device_catalog import entity_unique_id, iter_platform_services
 from .leelen.api.HttpApi import HttpApi
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,9 +28,6 @@ PRESET_MODES = {
 
 FIID_FRESHER = 49412
 FIID_PM_25 = 16450
-DEVICE_TYPE_FRESHER = 8217
-
-
 SPEED_PERCENTAGE = {
     0: 33,
     1: 66,
@@ -41,14 +41,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     devices = hass.data[DOMAIN].get('devices', {}).get(entry.entry_id, [])
     entities = []
 
-    for device in devices:
+    for device, logic_srv in iter_platform_services(devices, "fan"):
         direct_did = device.get("direct_did")
-        device_type = device.get("device_type")
-
-        if device_type in [DEVICE_TYPE_FRESHER]:
-            for logic_srv in device.get("logic_srv", []):
-                siid = logic_srv.get("siid")
-                entities.append(LeelenAirFresher(hass, entry, device, logic_srv, siid, direct_did))
+        siid = logic_srv.get("siid")
+        entities.append(LeelenAirFresher(hass, entry, device, logic_srv, siid, direct_did))
 
     async_add_entities(entities)
 
@@ -67,8 +63,6 @@ class LeelenFan(FanEntity):
         self._did = device.get("dev_addr")
         self._direct_did = direct_did
         self._siid = siid
-        self._device_type = device.get("device_type")
-
         self._name = logic_srv.get("logic_name", "Fan")
 
         self._is_on = False
@@ -77,7 +71,7 @@ class LeelenFan(FanEntity):
         self._oscillating = False
         self._direction = None
 
-        self._attr_unique_id = f"leelen_fan_{self._did}_{self._siid}"
+        self._attr_unique_id = entity_unique_id(device, logic_srv, "fan")
 
     @property
     def name(self):
@@ -229,6 +223,3 @@ class LeelenFan(FanEntity):
 # 新风风扇  FiID_FRESHER = 49412
 class LeelenAirFresher(LeelenFan): 
     _attr_name = "Leelen Air Fresher"
-    _attr_device_type = DEVICE_TYPE_FRESHER
-
-

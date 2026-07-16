@@ -7,12 +7,9 @@ Home Assistant integration for Leelen (立林) smart home devices.
 
 ## Features
 
-- **Climate**: Central air conditioner control
-- **Cover**: Curtain motor control
-- **Light**: Wireless light control
-- **Sensor**: Temperature, humidity, PM2.5 sensors
-- **Binary Sensor**: Door sensors, water immersion sensors
-- **Switch**: Smart wall socket control
+- **Climate**: Central air conditioner and floor-heating control
+- **Fan**: Fresh-air system control
+- **Sensor**: Temperature sensors exposed by thermostat panels
 
 ## Installation
 
@@ -21,7 +18,7 @@ Home Assistant integration for Leelen (立林) smart home devices.
 1. Open HACS in your Home Assistant
 2. Go to "Integrations" → Click "+" button
 3. Search for "Leelen Home" or add as custom repository:
-   - Repository: `https://github.com/snailll2/leelen_home3`
+   - Repository: `https://github.com/nishuzumi/leelen_home3`
    - Category: Integration
 4. Click "Download"
 5. Restart Home Assistant
@@ -41,11 +38,12 @@ Home Assistant integration for Leelen (立林) smart home devices.
 
 ## Supported Devices
 
-| Device Type | Model | Type Code |
-|------------|-------|-----------|
-| climate | DEVICE_TYPE_CLIMATE  | 8221 |
-| climate | DEVICE_TYPE_HEATTER | 8218 |
-| fan | DEVICE_TYPE_FRESHER | 8217 |
+| Home Assistant platform | Leelen logical service | Service type |
+|---|---|---:|
+| climate | Central air conditioner | 8259 |
+| climate | Floor heating | 8268 |
+| fan | Fresh-air system | 8261 |
+| sensor | Thermostat temperature sensor | 8272 |
 
 ## Troubleshooting
 
