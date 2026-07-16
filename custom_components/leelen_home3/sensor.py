@@ -1,11 +1,13 @@
 import logging
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 
 from .const import DOMAIN
+from .device_catalog import entity_unique_id, iter_platform_services, merge_temperature
 from .leelen.api.HttpApi import HttpApi
 
 _LOGGER = logging.getLogger(__name__)
@@ -17,39 +19,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     devices = hass.data[DOMAIN].get('devices', {}).get(entry.entry_id, [])
     entities = []
 
-    for device in devices:
+    for device, logic_srv in iter_platform_services(devices, "sensor"):
         direct_did = device.get("direct_did")
-
-        for logic_srv in device.get("logic_srv", []):
-            siid = logic_srv.get("siid")
-            params = logic_srv.get("params", [])
-
-            for param in params:
-                if param.get("dataType") in [1, 2, 3]:
-                    entities.append(LeelenSensor(hass, entry, device, logic_srv, siid, direct_did, param))
+        siid = logic_srv.get("siid")
+        entities.append(LeelenSensor(hass, entry, device, logic_srv, siid, direct_did))
 
     async_add_entities(entities)
 
 
 class LeelenSensor(SensorEntity):
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
 
-    def __init__(self, hass, entry, device, logic_srv, siid, direct_did, param_info):
+    def __init__(self, hass, entry, device, logic_srv, siid, direct_did):
         self._hass = hass
         self._entry = entry
         self._device = device
         self._logic_srv = logic_srv
         self._siid = siid
         self._direct_did = direct_did
-        self._param_info = param_info
         self._did = device.get("dev_addr")
+        self._state = None
 
-        property_name = param_info.get("propertyName", "unknown")
-        self._name = f"{logic_srv.get('logic_name', '')} {property_name}"
-        self._unique_id_suffix = f"{self._did}_{self._siid}_{param_info.get('propertyId', 'unknown')}"
-
-        self._attr_unique_id = f"leelen_sensor_{self._unique_id_suffix}"
+        self._name = logic_srv.get("logic_name", "Temperature")
+        self._attr_unique_id = entity_unique_id(device, logic_srv, "sensor")
         self._attr_icon = "mdi:thermometer"
-        self._attr_native_unit_of_measurement = param_info.get("unit")
 
     @property
     def name(self):
@@ -88,9 +82,8 @@ class LeelenSensor(SensorEntity):
                 if params:
                     fiids_data = params[0].get("fiids", [])
                     if fiids_data:
-                        value = fiids_data[0].get("value", {})
-                        if isinstance(value, dict):
-                            property_id = self._param_info.get("propertyId")
-                            self._state = value.get(property_id)
+                        self._state = merge_temperature(
+                            self._state, fiids_data[0].get("value")
+                        )
         except Exception as e:
             _LOGGER.error(f"更新传感器状态失败: {e}")

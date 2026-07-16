@@ -1,27 +1,24 @@
-import os
+import asyncio
 import hashlib
 import json
 import random
-from re import S
 import string
 import threading
 import time
 import uuid
 from typing import Any
 
-import aiofiles as aiofiles
-import aiohttp
-import aiosqlite
-from aiohttp import ClientError
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from ...device_catalog import normalize_device
 from ..entity.BaseParam import BaseParam, CodeLoginRequestParam, GetVerifyCodeRequestParam
 from ..entity.BaseRequest import BaseRequest
 from ..utils.AesCoder import AesCoder
 from ..utils.LogUtils import LogUtils
 from ..utils.RSAEncrypt import RSAEncrypt
+from .protocol import pending_read_delay
 
 
 class HttpApi:
@@ -83,7 +80,10 @@ class HttpApi:
             ) as res:
                 res.raise_for_status()
                 data = await res.json(encoding="utf-8")
-                LogUtils.d("HttpApi", f"refreshToken 返回: {data}")
+                LogUtils.d(
+                    "HttpApi",
+                    f"refreshToken 请求完成: result={data.get('result')}",
+                )
                 if data.get("result") == 1:
                     p = data.get("params", {})
                     new_token = p.get("accessToken")
@@ -143,7 +143,12 @@ class HttpApi:
         ) as res:
             res.raise_for_status()
             res_dict = await res.json(encoding="utf-8")
-            LogUtils.d("HttpApi", f"请求: {url} params={params} seq={seq} version={version} 返回: {res_dict}")
+            response_params = res_dict.get("params")
+            response_count = len(response_params) if isinstance(response_params, list) else None
+            LogUtils.d(
+                "HttpApi",
+                f"请求完成: url={url} seq={seq} result={res_dict.get('result')} params_count={response_count}",
+            )
 
             # token 过期（10001），自动刷新并重试
             if res_dict.get("result") == 10001 and self._refresh_token:
@@ -163,7 +168,10 @@ class HttpApi:
                     ) as res2:
                         res2.raise_for_status()
                         res_dict2 = await res2.json(encoding="utf-8")
-                        LogUtils.d("HttpApi", f"token刷新后重试: {url} 返回: {res_dict2}")
+                        LogUtils.d(
+                            "HttpApi",
+                            f"token刷新后重试完成: url={url} result={res_dict2.get('result')}",
+                        )
                         return res_dict2
                 else:
                     LogUtils.e("token刷新失败，无法重试请求")
@@ -208,51 +216,19 @@ class HttpApi:
             for device_info in params_data:
                 did = device_info.get("did")
                 direct_did = device_info.get("directDid")
-                name = device_info.get("name", "Unknown")
-                room_name = device_info.get("roomName", "")
-                profile_id = device_info.get("profileId")
-                device_type = device_info.get("deviceType")
-                model = device_info.get("softModel", "")
-
-                logic_device = {
-                    "dev_addr": did,
-                    "dev_name": name,
-                    "dev_type": str(profile_id) if profile_id else "",
-                    "direct_did": direct_did,
-                    "room_name": room_name,
-                    "profile_id": profile_id,
-                    "device_type": device_type,
-                    "model": model,
-                    "logic_srv": []
-                }
-
+                detail_result = {"result": 0, "params": []}
                 if did and direct_did:
                     try:
                         detail_result = await self.get_devices(
                             did=did,
                             direct_did=direct_did
                         )
-                        if detail_result.get("result") == 1:
-                            detail_params = detail_result.get("params", [])
-                            if detail_params:
-                                device_data = detail_params[0]
-                                logic_devices = device_data.get("logicDevices", [])
-                                for logic_dev in logic_devices:
-                                    logic_device["logic_srv"].append({
-                                        "siid": logic_dev.get("siid"),        # 原始 siid
-                                        "fiid": logic_dev.get("siid"),        # 兼容现有代码
-                                        "logic_name": logic_dev.get("logicName", ""),
-                                        "profile_id": profile_id,
-                                        "service_type": logic_dev.get("serviceType"),
-                                        "service_name": logic_dev.get("purposeTypeName", "")
-                                    })
-                                
-                        else:
+                        if detail_result.get("result") != 1:
                             LogUtils.d("HttpApi", f"设备 {did} getDevices 失败: result={detail_result.get('result')}")
                     except Exception as e:
                         LogUtils.e(f"获取设备 {did} 详情失败: {e}")
 
-                devices.append(logic_device)
+                devices.append(normalize_device(device_info, detail_result))
         else:
             LogUtils.d("HttpApi", f"getPhysicsDeviceList 返回失败: result={result.get('result')}")
 
@@ -372,7 +348,6 @@ class HttpApi:
         baseRequest = BaseRequest()
         baseRequest.params = params.to_dict()
         baseRequest.seq = 93
-        LogUtils.d(json.dumps(baseRequest.to_dict()))
         session = async_get_clientsession(self._hass)
         async with session.post(
                 f"{self.BASE_URL}/rest/app/community/security/getVerifyCode",
@@ -381,7 +356,6 @@ class HttpApi:
         ) as res:
             res.raise_for_status()
             data = await res.json(encoding="utf-8")
-            LogUtils.d(data)
             self.verifyCodeSign = data.get("params")
             self.username = username
             return data
@@ -393,14 +367,10 @@ class HttpApi:
         params.verifyCode = verifyCode
         params.verifyCodeSign = verifyCodeSign
         params.terminalId = self.appTerminalId
-        LogUtils.d(json.dumps(params.to_dict()))
-
         params = self.encrypt_params(params.to_dict(), publicKey)
         baseRequest = BaseRequest()
         baseRequest.params = params.to_dict()
         baseRequest.seq = 93
-        LogUtils.d(json.dumps(baseRequest.to_dict()))
-
         session = async_get_clientsession(self._hass)
 
         async with session.post(
@@ -410,8 +380,6 @@ class HttpApi:
         ) as res:
             res.raise_for_status()
             data = await res.json(encoding="utf-8")
-            LogUtils.d(baseRequest.to_dict())
-            LogUtils.d(data)
             if data["result"] != 1:
                 raise Exception(data["message"])
             self.verifyCodeSign = data.get("params")
@@ -421,7 +389,6 @@ class HttpApi:
     async def code_login(self, verifyCode):
         self.uuid = await self.get_uuid()
         code_login_result = await self.verifyCodeLogin(self.username, verifyCode, self.verifyCodeSign, self.uuid)
-        LogUtils.d("HttpApi", f"verifyCodeLogin 响应: {code_login_result}")
         accessToken = code_login_result.get("params", {}).get("accessToken")
         self._access_token = accessToken
         # 验证码登录也可能返回 refreshToken
@@ -434,7 +401,6 @@ class HttpApi:
         password = user_data.get("params", {}).get("password")
 
         third_result = await self.third_login(username, password)
-        LogUtils.d("HttpApi", f"third_login 响应: {third_result}")
         # 如果 verifyCodeLogin 没给 refreshToken，试试从 third_login 拿
         if not self._refresh_token:
             rt = third_result.get("refreshToken") or third_result.get("token") or third_result.get("accessToken")
@@ -449,7 +415,6 @@ class HttpApi:
                 LogUtils.d("HttpApi", "从 third_login 覆盖 refreshToken")
         bindCallers = third_result.get("bindCallers")
         accountId = third_result.get("accountId")
-        LogUtils.d("third_result", third_result)
         group_name  = "我的家"
         homes_result = await self.get_homes()
         homes = homes_result.get("params", [])
@@ -491,7 +456,6 @@ class HttpApi:
         ) as res:
             res.raise_for_status()
             data = await res.json(encoding="utf-8")
-            LogUtils.d(data)
             self.uuid = data.get("params", {}).get("uuid")
             return data.get("params", {}).get("uuid")
 
@@ -572,7 +536,12 @@ class HttpApi:
             "isRealDate": is_real_date,
             "siid": siid
         }]
-        return await self._make_request(url, params, seq)
+        result = await self._make_request(url, params, seq)
+        retry_delay = pending_read_delay(result)
+        if retry_delay is not None:
+            await asyncio.sleep(retry_delay)
+            return await self._make_request(url, params, seq)
+        return result
 
     async def encrypt_v1_ctrl_fiids(self, siid, direct_did, fiids, did, seq=1):
         url = f"{self.BASE_URL}/rest/app/community/encryptV1CtrlFIIDS"

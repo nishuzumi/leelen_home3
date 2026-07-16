@@ -8,6 +8,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 
 from .const import DOMAIN
+from .device_catalog import (
+    SERVICE_TYPE_CENTRAL_AIR_CONDITIONER,
+    entity_unique_id,
+    iter_platform_services,
+)
 from .leelen.api.HttpApi import HttpApi
 
 _LOGGER = logging.getLogger(__name__)
@@ -27,10 +32,6 @@ HVAC_MODE_MAP = {
     2: HVACMode.FAN_ONLY,
     3: HVACMode.DRY,
 }
-DEVICE_TYPE_CLIMATE = 8221
-DEVICE_TYPE_HEATTER = 8218
-
-
 REVERSE_HVAC_MODE_MAP = {v: k for k, v in HVAC_MODE_MAP.items()}
 
 
@@ -38,18 +39,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     devices = hass.data[DOMAIN].get('devices', {}).get(entry.entry_id, [])
     entities = []
 
-    for device in devices:
+    for device, logic_srv in iter_platform_services(devices, "climate"):
         direct_did = device.get("direct_did")
-        device_type = device.get("device_type")
-
-        if device_type  in [DEVICE_TYPE_CLIMATE]:
-            for logic_srv in device.get("logic_srv", []):
-                siid = logic_srv.get("siid")
-                entities.append(LeelenClimate(hass, entry, device, logic_srv, siid, direct_did))
-        elif device_type == DEVICE_TYPE_HEATTER:
-            for logic_srv in device.get("logic_srv", []):
-                siid = logic_srv.get("siid")
-                entities.append(LeelenHeater(hass, entry, device, logic_srv, siid, direct_did))
+        siid = logic_srv.get("siid")
+        entity_class = (
+            LeelenClimate
+            if logic_srv.get("service_type") == SERVICE_TYPE_CENTRAL_AIR_CONDITIONER
+            else LeelenHeater
+        )
+        entities.append(entity_class(hass, entry, device, logic_srv, siid, direct_did))
     async_add_entities(entities)
 
 
@@ -69,7 +67,12 @@ class LeelenClimate(ClimateEntity):
         self._direct_did = direct_did
         self._siid = siid
         self._name = logic_srv.get("logic_name", "Air Conditioner")
-        self._device_type = device.get("device_type")
+        self._service_type = logic_srv.get("service_type")
+        self._fiid = (
+            FIID_CLIMATE
+            if self._service_type == SERVICE_TYPE_CENTRAL_AIR_CONDITIONER
+            else FIID_HEATER
+        )
         self._current_temperature = None
         self._target_temperature = 26
         self._hvac_mode = HVACMode.OFF
@@ -77,7 +80,7 @@ class LeelenClimate(ClimateEntity):
         self._fan_mode = FAN_MEDIUM
         self._on_off = False
 
-        self._attr_unique_id = f"leelen_climate_{self._did}_{self._siid}"
+        self._attr_unique_id = entity_unique_id(device, logic_srv, "climate")
 
     @property
     def name(self):
@@ -156,7 +159,7 @@ class LeelenClimate(ClimateEntity):
             await HttpApi.get_instance(self._hass).encrypt_v1_ctrl_fiids(
                 siid=self._siid,
                 direct_did=self._direct_did,
-                fiids=[{"fiid": FIID_CLIMATE if self._device_type == DEVICE_TYPE_CLIMATE else FIID_HEATER, "value": value}],
+                fiids=[{"fiid": self._fiid, "value": value}],
                 did=self._did
             )
 
@@ -171,7 +174,7 @@ class LeelenClimate(ClimateEntity):
             result = await HttpApi.get_instance(self._hass).read_dids_fiids(
                 did=self._did,
                 direct_did=self._direct_did,
-                fiids=[FIID_CLIMATE if self._device_type == DEVICE_TYPE_CLIMATE else FIID_HEATER],
+                fiids=[self._fiid],
                 siid=self._siid
             )
             if result.get("result") == 1:
@@ -189,6 +192,8 @@ class LeelenClimate(ClimateEntity):
 
                             if not self._on_off:
                                 self._hvac_mode = HVACMode.OFF
+                            elif self._service_type != SERVICE_TYPE_CENTRAL_AIR_CONDITIONER:
+                                self._hvac_mode = HVACMode.HEAT
 
                             wind_speed = value.get("windSpeed")
                             if wind_speed is not None:
