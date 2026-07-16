@@ -89,8 +89,8 @@ class LeelenClimate(ClimateEntity):
     @property
     def device_info(self) -> DeviceInfo:
         return DeviceInfo(
-            identifiers={(DOMAIN, self._did)},
-            name=self._device.get("dev_name", "Leelen Device"),
+            identifiers={(DOMAIN, self._logic_srv["service_id"])},
+            name=self._name,
             manufacturer="Leelen",
             model=str(self._device.get("model")),
         )
