@@ -107,28 +107,31 @@ def load_platforms():
     }
 
 
+def create_live_platform_entities():
+    catalog = load_catalog_module()
+    devices = [
+        catalog.normalize_device(physical, detail)
+        for physical, detail in LIVE_ACCOUNT_FIXTURE
+    ]
+    platforms = load_platforms()
+
+    class Entry:
+        entry_id = "entry-1"
+
+    class Hass:
+        data = {"leelen3": {"devices": {"entry-1": devices}}}
+
+    created = {}
+    for name, platform in platforms.items():
+        entities = []
+        asyncio.run(platform.async_setup_entry(Hass(), Entry(), entities.extend))
+        created[name] = entities
+    return created
+
+
 class PlatformSetupTests(unittest.TestCase):
     def test_platforms_create_entities_from_logical_service_types(self):
-        catalog = load_catalog_module()
-        devices = [
-            catalog.normalize_device(physical, detail)
-            for physical, detail in LIVE_ACCOUNT_FIXTURE
-        ]
-        platforms = load_platforms()
-
-        class Entry:
-            entry_id = "entry-1"
-
-        class Hass:
-            data = {"leelen3": {"devices": {"entry-1": devices}}}
-
-        created = {}
-        for name, platform in platforms.items():
-            entities = []
-            asyncio.run(
-                platform.async_setup_entry(Hass(), Entry(), entities.extend)
-            )
-            created[name] = entities
+        created = create_live_platform_entities()
 
         self.assertEqual(11, len(created["climate"]))
         self.assertEqual(1, len(created["fan"]))
@@ -140,6 +143,26 @@ class PlatformSetupTests(unittest.TestCase):
         self.assertEqual(
             "次卧1中央空调",
             created["climate"][0].name,
+        )
+
+    def test_climate_zones_are_separate_devices_without_splitting_other_platforms(self):
+        created = create_live_platform_entities()
+
+        climate_identifiers = {
+            next(iter(entity.device_info["identifiers"]))
+            for entity in created["climate"]
+        }
+        self.assertEqual(11, len(climate_identifiers))
+        self.assertIn(("leelen3", "ac-module_2"), climate_identifiers)
+        self.assertIn(("leelen3", "heating-module_2"), climate_identifiers)
+
+        self.assertEqual(
+            {("leelen3", "fresh-air-module")},
+            created["fan"][0].device_info["identifiers"],
+        )
+        self.assertEqual(
+            {("leelen3", "panel-1")},
+            created["sensor"][0].device_info["identifiers"],
         )
 
     def test_floor_heater_reports_heat_when_on_without_mode_field(self):
