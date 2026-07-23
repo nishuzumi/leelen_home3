@@ -1,6 +1,6 @@
 DOMAIN = "leelen3"
 NAME = "Leelen Home3"
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 
 CONF_PHONE = "phone"
 CONF_DEVICE_ADDR = "deviceAddr"
@@ -11,6 +11,8 @@ CONF_ACCESS_TOKEN = "accessToken"
 CONF_REFRESH_TOKEN = "refreshToken"
 CONF_GATEWAY_IP = "gateway_ip"
 CONF_GROUP_ID = "groupId"
+CONF_MQTT_CLIENT_ID = "mqtt_client_id"
+CONF_MQTT_USERNAME = "mqtt_username"
 
 OPTIONS_CONFIG = "config"
 OPTIONS_SELECT = "select"

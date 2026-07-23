@@ -11,7 +11,13 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from .const import DOMAIN, CONF_PHONE, OPTIONS_CONFIG
+from .const import (
+    CONF_MQTT_CLIENT_ID,
+    CONF_MQTT_USERNAME,
+    CONF_PHONE,
+    DOMAIN,
+    OPTIONS_CONFIG,
+)
 from .device_catalog import PLATFORM_SERVICE_TYPES, entity_unique_id, iter_platform_services
 from .leelen.api.HttpApi import HttpApi
 from .leelen.utils.LogUtils import LogUtils
@@ -191,7 +197,54 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         return self.async_show_menu(
             step_id="init",
-            menu_options=["refresh"],
+            menu_options=["refresh", "mqtt"],
+        )
+
+    async def async_step_mqtt(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> FlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            client_id = str(
+                user_input.get(CONF_MQTT_CLIENT_ID) or ""
+            ).strip()
+            username = str(
+                user_input.get(CONF_MQTT_USERNAME) or ""
+            ).strip()
+            if bool(client_id) != bool(username):
+                errors["base"] = "mqtt_pair_required"
+            else:
+                options = dict(self._config_entry.options)
+                if client_id:
+                    options[CONF_MQTT_CLIENT_ID] = client_id
+                    options[CONF_MQTT_USERNAME] = username
+                else:
+                    options.pop(CONF_MQTT_CLIENT_ID, None)
+                    options.pop(CONF_MQTT_USERNAME, None)
+                return self.async_create_entry(title="", data=options)
+
+        return self.async_show_form(
+            step_id="mqtt",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_MQTT_CLIENT_ID,
+                        default=self._config_entry.options.get(
+                            CONF_MQTT_CLIENT_ID,
+                            "",
+                        ),
+                    ): str,
+                    vol.Optional(
+                        CONF_MQTT_USERNAME,
+                        default=self._config_entry.options.get(
+                            CONF_MQTT_USERNAME,
+                            "",
+                        ),
+                    ): str,
+                }
+            ),
+            errors=errors,
         )
 
     async def async_step_refresh(self, user_input: dict[str, Any] | None = None) -> FlowResult:

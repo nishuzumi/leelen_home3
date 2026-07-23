@@ -7,9 +7,13 @@ Home Assistant integration for Leelen (立林) smart home devices.
 
 ## Features
 
-- **Climate**: Central air conditioner and floor-heating control
+- **Climate**: Central air conditioner and floor-heating control with current
+  temperature and humidity, target temperature, mode, and fan-speed state
 - **Fan**: Fresh-air system control
-- **Sensor**: Temperature sensors exposed by thermostat panels
+- **Sensor**: Temperature and humidity sensors exposed by every discovered
+  thermostat panel
+- **Live state**: Optional MQTT state pushes with REST used for the initial
+  snapshot, disconnected fallback, and control confirmation
 
 ## Installation
 
@@ -36,14 +40,18 @@ Home Assistant integration for Leelen (立林) smart home devices.
 4. Enter your phone number and verification code
 5. Select the devices you want to add
 
+To enable real-time state updates, open the integration options and enter the
+MQTT Client ID and username already registered by the Leelen app. Both values
+are required; leaving both empty keeps REST fallback sync enabled.
+
 ## Supported Devices
 
 | Home Assistant platform | Leelen logical service | Service type |
 |---|---|---:|
-| climate | Central air conditioner | 8259 |
-| climate | Floor heating | 8268 |
+| climate | Central air conditioner, including current temperature and humidity | 8259 |
+| climate | Floor heating, including current temperature and humidity | 8268 |
 | fan | Fresh-air system | 8261 |
-| sensor | Thermostat temperature sensor | 8272 |
+| sensor | Thermostat temperature and humidity sensors | 8272 |
 
 ## Troubleshooting
 

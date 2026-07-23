@@ -28,12 +28,24 @@
     }
   },
   "options": {
+    "error": {
+      "mqtt_pair_required": "MQTT Client ID and username must both be set or both be empty"
+    },
     "step": {
       "init": {
         "title": "Device Management",
         "menu_options": {
           "refresh": "Sync Devices",
+          "mqtt": "MQTT Live State",
           "cancel": "Cancel"
+        }
+      },
+      "mqtt": {
+        "title": "MQTT Live State",
+        "description": "Enter the MQTT Client ID and username already registered by the Leelen app to enable live state pushes. The current login token is used as the password. Leave both fields empty to disable MQTT and use REST fallback sync.",
+        "data": {
+          "mqtt_client_id": "MQTT Client ID",
+          "mqtt_username": "MQTT Username"
         }
       },
       "refresh": {
