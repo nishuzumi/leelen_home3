@@ -28,6 +28,11 @@ TEMPERATURE_KEYS = (
     "temp",
 )
 
+HUMIDITY_KEYS = (
+    "humidity",
+    "relativeHumidity",
+)
+
 
 def _matching_detail(did: Any, detail_response: Mapping[str, Any]) -> Mapping[str, Any]:
     detail_items = detail_response.get("params") or []
@@ -62,6 +67,7 @@ def normalize_device(
                 "profile_id": logical_device.get("profileId"),
                 "service_type": service_type,
                 "service_name": logical_device.get("purposeTypeName") or "",
+                "sub_group_id": logical_device.get("subGroupId"),
             }
         )
 
@@ -117,3 +123,20 @@ def merge_temperature(previous: float | None, value: Any) -> float | None:
     """Keep the last reading when the gateway has not returned a value yet."""
     current = extract_temperature(value)
     return previous if current is None else current
+
+
+def extract_humidity(value: Any) -> float | None:
+    """Extract a relative-humidity percentage from a sensor FIID payload."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, str)):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(value, Mapping):
+        return None
+    for key in HUMIDITY_KEYS:
+        if key in value:
+            return extract_humidity(value[key])
+    return None

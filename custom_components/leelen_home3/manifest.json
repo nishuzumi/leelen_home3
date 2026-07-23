@@ -8,14 +8,14 @@
   "dependencies": [],
   "documentation": "",
   "integration_type": "hub",
-  "iot_class": "cloud_polling",
+  "iot_class": "cloud_push",
   "issue_tracker": "",
   "loggers": [
     "Leelen Home3"
   ],
   "requirements": [
     "construct>=2.10.56",
-    "paho-mqtt",
+    "paho-mqtt>=2.0.0",
     "numpy",
     "cryptography",
     "psutil",
@@ -23,5 +23,5 @@
     "aiohttp>=3.8.0",
     "aiofiles>=0.7.0"
   ],
-  "version": "0.3.1"
+  "version": "0.3.2"
 }

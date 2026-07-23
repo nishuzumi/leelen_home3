@@ -41,12 +41,24 @@
     }
   },
   "options": {
+    "error": {
+      "mqtt_pair_required": "MQTT Client ID 和用户名必须同时填写或同时留空"
+    },
     "step": {
       "init": {
         "title": "设备管理",
         "menu_options": {
           "refresh": "同步设备",
+          "mqtt": "MQTT 实时状态",
           "cancel": "取消"
+        }
+      },
+      "mqtt": {
+        "title": "MQTT 实时状态",
+        "description": "填写立林 App 已注册的 MQTT Client ID 和用户名以启用实时推送。密码自动使用当前登录 Token。留空两项可停用 MQTT 并使用 REST 兜底同步。",
+        "data": {
+          "mqtt_client_id": "MQTT Client ID",
+          "mqtt_username": "MQTT 用户名"
         }
       },
       "refresh": {

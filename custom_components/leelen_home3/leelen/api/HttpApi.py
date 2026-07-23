@@ -527,32 +527,46 @@ class HttpApi:
         }
         return await self._make_request(url, params, seq)
 
-    async def read_dids_fiids(self, did, direct_did, fiids, siid, is_real_date=0, seq=1):
+    async def read_dids_fiids(
+        self,
+        did,
+        direct_did,
+        fiids,
+        siid,
+        is_real_date=None,
+        seq=1,
+    ):
         url = f"{self.BASE_URL}/rest/app/community/readDidsFIIDS"
-        params = [{
+        request = {
             "did": did,
+            "siid": siid,
             "directDid": direct_did,
             "fiids": fiids,
-            "isRealDate": is_real_date,
-            "siid": siid
-        }]
-        result = await self._make_request(url, params, seq)
+        }
+        if is_real_date is not None:
+            request["isRealDate"] = is_real_date
+        return await self.read_dids_fiids_batch([request], seq=seq)
+
+    async def read_dids_fiids_batch(self, params, seq=1):
+        """Read multiple original-format DID/SIID entries in one request."""
+        url = f"{self.BASE_URL}/rest/app/community/readDidsFIIDS"
+        result = await self._make_request(url, params, seq, version="v0.1")
         retry_delay = pending_read_delay(result)
         if retry_delay is not None:
             await asyncio.sleep(retry_delay)
-            return await self._make_request(url, params, seq)
+            return await self._make_request(url, params, seq, version="v0.1")
         return result
 
     async def encrypt_v1_ctrl_fiids(self, siid, direct_did, fiids, did, seq=1):
         url = f"{self.BASE_URL}/rest/app/community/encryptV1CtrlFIIDS"
         params = {
-            "siid": siid,
+            "did": did,
             "directDid": direct_did,
+            "siid": siid,
             "fiids": fiids,
-            "did": did
         }
         LogUtils.d("HttpApi", f"encrypt_v1_ctrl_fiids 请求: siid={siid}, directDid={direct_did}, fiids={fiids}, did={did}")
-        return await self._make_request(url, params, seq)
+        return await self._make_request(url, params, seq, version="v1.1")
 
     async def batch_get_device_online_info(self, did, direct_did, seq=1):
         url = f"{self.BASE_URL}/rest/app/community/dc/batchGetDeviceOnlineInfo"
