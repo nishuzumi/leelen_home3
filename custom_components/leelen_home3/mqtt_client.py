@@ -7,7 +7,6 @@ import logging
 import ssl
 
 from .coordinator import SERVICE_FIIDS
-from .leelen.api.HttpApi import HttpApi
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,6 +24,7 @@ class LeelenMqttClient:
         self,
         hass,
         coordinator,
+        api,
         client_id,
         username,
     ):
@@ -32,6 +32,7 @@ class LeelenMqttClient:
 
         self._hass = hass
         self._coordinator = coordinator
+        self._api = api
         self._client_id = client_id
         self._username = username
         self._stopped = False
@@ -70,8 +71,10 @@ class LeelenMqttClient:
         self._client.loop_stop()
 
     def _set_credentials(self):
-        token = HttpApi.get_instance(self._hass)._access_token
-        self._client.username_pw_set(self._username, token)
+        self._client.username_pw_set(
+            self._username,
+            self._api._access_token,
+        )
 
     def _topics(self):
         topics = {f"lliot/receiver/{self._client_id}"}

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from datetime import timedelta
 from time import monotonic, time
 
@@ -14,8 +13,9 @@ from .device_catalog import (
     SERVICE_TYPE_CENTRAL_AIR_CONDITIONER,
     SERVICE_TYPE_FLOOR_HEATING,
     SERVICE_TYPE_SENSOR,
+    build_climate_sensor_sources,
 )
-from .leelen.api.HttpApi import HttpApi
+from .leelen.api.protocol import pending_read_delay
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,15 +47,11 @@ REST_PUSH_INTERVAL = timedelta(minutes=5)
 CONTROL_PENDING_SECONDS = 60.0
 CONTROL_CONFIRMED_GRACE_SECONDS = 20.0
 
-_ROOM_NAME_SUFFIXES = re.compile(
-    r"(中央空调|空调|地暖|温湿度传感器|温湿度|传感器|温控面板|温控器|温控|面板)"
-)
-_ROOM_NAME_SEPARATORS = re.compile(r"[\s_\-（）()]+")
-
 
 class LeelenCoordinator(DataUpdateCoordinator):
+    """Own device discovery, state merging, and control confirmation."""
 
-    def __init__(self, hass: HomeAssistant, entry):
+    def __init__(self, hass: HomeAssistant, entry, api):
         super().__init__(
             hass,
             _LOGGER,
@@ -64,7 +60,7 @@ class LeelenCoordinator(DataUpdateCoordinator):
             config_entry=entry,
         )
         self._entry = entry
-        self._device_addr = entry.data.get("deviceAddr")
+        self._api = api
         self._data = {}
         self._control_expectations = {}
         self._mqtt_connected = False
@@ -72,40 +68,46 @@ class LeelenCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         _LOGGER.debug("=== 开始 REST 状态同步 ===")
         try:
-            api = HttpApi.get_instance(self.hass)
-            devices = await api.get_device_list_v2()
-            devices = await api.get_online_status(devices)
+            devices = self.get_devices()
+            topology_changed = not devices
+            if topology_changed:
+                devices = await self._api.get_device_list_v2()
+                devices = await self._api.get_online_status(devices)
+
             reads = self._build_state_reads(devices)
             state_response = (
-                await api.read_dids_fiids_batch(reads)
+                await self._api.read_dids_fiids_batch(reads)
                 if reads
                 else {"result": 1, "params": []}
             )
             states, state_times = self._state_index(state_response)
-
-            hass_data = self.hass.data.setdefault(DOMAIN, {})
-            hass_data.setdefault("devices", {})[self._entry.entry_id] = devices
+            sensor_sources = (
+                build_climate_sensor_sources(devices)
+                if topology_changed
+                else self._data.get("climate_sensor_sources", {})
+            )
 
             self._data = {
                 "devices": devices,
                 "states": states,
                 "state_times": state_times,
-                "humidity_sources": self._build_humidity_sources(devices),
+                "climate_sensor_sources": sensor_sources,
                 "mqtt_connected": self._mqtt_connected,
             }
 
-            _LOGGER.debug("=== REST 状态同步完成，%s 个设备 ===", len(devices))
+            hass_data = self.hass.data.setdefault(DOMAIN, {})
+            hass_data.setdefault("devices", {})[
+                self._entry.entry_id
+            ] = devices
+            _LOGGER.debug(
+                "=== REST 状态同步完成，%s 个设备%s ===",
+                len(devices),
+                "（已刷新拓扑）" if topology_changed else "",
+            )
             return self._data
         except Exception as exc:
             _LOGGER.error("=== REST 状态同步失败: %s ===", exc)
             raise
-
-    async def async_stop_timer(self):
-        """Compatibility hook retained for existing unload code."""
-
-    @property
-    def mqtt_connected(self):
-        return self._mqtt_connected
 
     def async_set_mqtt_connected(self, connected):
         """Switch REST between disconnected fallback and push safety refresh."""
@@ -125,9 +127,6 @@ class LeelenCoordinator(DataUpdateCoordinator):
             int(self.update_interval.total_seconds()),
         )
 
-    def get_device_state(self, did, fiid):
-        return self._data.get(f"{did}_{fiid}")
-
     def get_devices(self):
         return self._data.get("devices", [])
 
@@ -135,302 +134,54 @@ class LeelenCoordinator(DataUpdateCoordinator):
         return self._data.get("states", {}).get((did, siid, fiid))
 
     def get_climate_humidity(self, did, siid):
-        source = self._data.get("humidity_sources", {}).get((did, siid))
+        source = self._data.get("climate_sensor_sources", {}).get(
+            (did, siid)
+        )
         if source is None:
             return None
-        return self.get_fiid_value(*source)
+        return self.get_fiid_value(*source, FIID_HUMIDITY)
 
-    def expect_fiid_value(self, did, siid, fiid, expected):
-        """Protect a pending control from stale cloud snapshots."""
-        self._control_expectations[(did, siid, fiid)] = {
-            "expected": dict(expected),
-            "confirmed": False,
-            "deadline": monotonic() + CONTROL_PENDING_SECONDS,
-            "event": asyncio.Event(),
-        }
-
-    async def async_wait_for_fiid_value(
+    async def async_control_fiid(
         self,
+        *,
         did,
-        siid,
-        fiid,
-        timeout,
-    ):
-        """Wait for MQTT or REST to confirm the expected FIID value."""
-        expectation = self._control_expectations.get((did, siid, fiid))
-        if expectation is None:
-            return False
-        if expectation["confirmed"]:
-            return True
-        if timeout <= 0:
-            return False
-        try:
-            await asyncio.wait_for(expectation["event"].wait(), timeout)
-        except TimeoutError:
-            return False
-        return True
-
-    def confirm_fiid_value(
-        self,
-        did,
+        direct_did,
         siid,
         fiid,
         value,
-        state_time=None,
     ):
+        """Send one original-format control and merge device confirmation."""
         key = (did, siid, fiid)
-        self._accept_state_value(
-            self._data.setdefault("states", {}),
-            self._data.setdefault("state_times", {}),
-            key,
-            value,
-            state_time,
-        )
-
-    def async_notify_state(self):
-        """Notify coordinator listeners after a targeted state confirmation."""
-        self.async_set_updated_data(self._data)
-
-    def clear_fiid_expectation(self, did, siid, fiid):
-        self._control_expectations.pop((did, siid, fiid), None)
-
-    @staticmethod
-    def _value_matches(value, expected):
-        return isinstance(value, dict) and all(
-            value.get(key) == expected_value
-            for key, expected_value in expected.items()
-        )
-
-    @staticmethod
-    def _build_state_reads(devices):
-        reads = []
-        for device in devices:
-            did = device.get("dev_addr")
-            direct_did = device.get("direct_did")
-            if not did or not direct_did:
-                continue
-            for service in device.get("logic_srv") or []:
-                fiids = SERVICE_FIIDS.get(service.get("service_type"))
-                siid = service.get("siid")
-                if not fiids or siid is None:
-                    continue
-                reads.append(
-                    {
-                        "did": did,
-                        "siid": siid,
-                        "directDid": direct_did,
-                        "fiids": list(fiids),
-                        "isRealDate": 1,
-                    }
-                )
-        return reads
-
-    @classmethod
-    def _build_humidity_sources(cls, devices):
-        sensors_by_group = {}
-        sensors = []
-        climates = []
-        for device in devices:
-            did = device.get("dev_addr")
-            for service in device.get("logic_srv") or []:
-                siid = service.get("siid")
-                sub_group_id = service.get("sub_group_id")
-                if did is None or siid is None:
-                    continue
-                item = (device, service)
-                if service.get("service_type") == SERVICE_TYPE_SENSOR:
-                    sensors.append(item)
-                    if sub_group_id is not None:
-                        sensors_by_group.setdefault(
-                            sub_group_id,
-                            [],
-                        ).append(item)
-                elif service.get("service_type") in (
-                    SERVICE_TYPE_CENTRAL_AIR_CONDITIONER,
-                    SERVICE_TYPE_FLOOR_HEATING,
-                ):
-                    climates.append(item)
-
-        sources = {}
-        unresolved = []
-        used_sensor_names = set()
-        for device, service in climates:
-            climate_name = cls._normalized_room_name(
-                service.get("logic_name")
-            )
-            exact_candidates = [
-                candidate
-                for candidate in sensors
-                if cls._normalized_room_name(
-                    candidate[1].get("logic_name")
-                )
-                == climate_name
-            ]
-            partial_candidates = [
-                candidate
-                for candidate in sensors
-                if climate_name
-                and (
-                    climate_name
-                    in cls._normalized_room_name(
-                        candidate[1].get("logic_name")
-                    )
-                    or cls._normalized_room_name(
-                        candidate[1].get("logic_name")
-                    )
-                    in climate_name
-                )
-            ]
-            room_candidates = sensors_by_group.get(
-                service.get("sub_group_id"),
-                [],
-            )
-            candidates = (
-                exact_candidates
-                or partial_candidates
-                or room_candidates
-            )
-            if not candidates:
-                unresolved.append((device, service, climate_name))
-                continue
-            source_device, source_service = cls._select_room_sensor(
-                service,
-                candidates,
-            )
-            sources[(device.get("dev_addr"), service.get("siid"))] = (
-                source_device.get("dev_addr"),
-                source_service.get("siid"),
-                FIID_HUMIDITY,
-            )
-            used_sensor_names.add(
-                cls._normalized_room_name(
-                    source_service.get("logic_name")
-                )
-            )
-
-        unresolved_names = {
-            climate_name
-            for _, _, climate_name in unresolved
-            if climate_name
-        }
-        remaining_sensors = [
-            item
-            for item in sensors
-            if cls._normalized_room_name(item[1].get("logic_name"))
-            not in used_sensor_names
-        ]
-        remaining_names = {
-            cls._normalized_room_name(service.get("logic_name"))
-            for _, service in remaining_sensors
-        }
-        if len(unresolved_names) == 1 and len(remaining_names) == 1:
-            source_device, source_service = remaining_sensors[0]
-            source = (
-                source_device.get("dev_addr"),
-                source_service.get("siid"),
-                FIID_HUMIDITY,
-            )
-            for device, service, _ in unresolved:
-                sources[(device.get("dev_addr"), service.get("siid"))] = source
-        return sources
-
-    @classmethod
-    def _select_room_sensor(cls, climate_service, candidates):
-        if len(candidates) == 1:
-            return candidates[0]
-
-        climate_name = cls._normalized_room_name(
-            climate_service.get("logic_name")
-        )
-        exact_matches = [
-            candidate
-            for candidate in candidates
-            if cls._normalized_room_name(candidate[1].get("logic_name"))
-            == climate_name
-        ]
-        if exact_matches:
-            return exact_matches[0]
-
-        partial_matches = [
-            candidate
-            for candidate in candidates
-            if climate_name
-            and (
-                climate_name
-                in cls._normalized_room_name(candidate[1].get("logic_name"))
-                or cls._normalized_room_name(candidate[1].get("logic_name"))
-                in climate_name
-            )
-        ]
-        return partial_matches[0] if partial_matches else candidates[0]
-
-    @staticmethod
-    def _normalized_room_name(name):
-        value = _ROOM_NAME_SUFFIXES.sub("", str(name or ""))
-        return _ROOM_NAME_SEPARATORS.sub("", value).casefold()
-
-    def _state_index(self, response):
-        states = dict(self._data.get("states", {}))
-        state_times = dict(self._data.get("state_times", {}))
-        if response.get("result") != 1:
-            return states, state_times
-        for item in response.get("params") or []:
-            did = item.get("did")
-            siid = item.get("siid")
-            for fiid_data in item.get("fiids") or []:
-                fiid = fiid_data.get("fiid")
-                if did is None or siid is None or fiid is None:
-                    continue
-                self._accept_state_value(
-                    states,
-                    state_times,
-                    (did, siid, fiid),
-                    fiid_data.get("value"),
-                    fiid_data.get("time"),
-                )
-        return states, state_times
-
-    def _accept_state_value(
-        self,
-        states,
-        state_times,
-        key,
-        value,
-        state_time,
-    ):
-        previous_time = state_times.get(key)
-        if self._is_older(state_time, previous_time):
-            return False
-
-        expectation = self._control_expectations.get(key)
-        now = monotonic()
-        if expectation is not None:
-            if self._value_matches(value, expectation["expected"]):
-                if not expectation["confirmed"]:
-                    expectation["confirmed"] = True
-                    expectation["deadline"] = (
-                        now + CONTROL_CONFIRMED_GRACE_SECONDS
-                    )
-                    expectation["event"].set()
-            elif now < expectation["deadline"]:
-                return False
-            else:
-                self._control_expectations.pop(key, None)
-
-        changed = states.get(key) != value
-        states[key] = value
-        if state_time is not None:
-            state_times[key] = state_time
-        return changed
-
-    @staticmethod
-    def _is_older(state_time, previous_time):
-        if state_time is None or previous_time is None:
-            return False
+        self._begin_control(key, value)
         try:
-            return float(state_time) < float(previous_time)
-        except (TypeError, ValueError):
-            return False
+            result = await self._api.encrypt_v1_ctrl_fiids(
+                did=did,
+                direct_did=direct_did,
+                siid=siid,
+                fiids=[{"fiid": fiid, "value": value}],
+            )
+            if result.get("result") != 1:
+                self._control_expectations.pop(key, None)
+                return False
+
+            retry_delay = pending_read_delay(result)
+            if (
+                retry_delay is not None
+                and await self._wait_for_control(key, retry_delay)
+            ):
+                return True
+
+            read_result = await self._api.read_dids_fiids(
+                did=did,
+                direct_did=direct_did,
+                fiids=[fiid, FIID_TEMPERATURE],
+                siid=siid,
+                is_real_date=1,
+            )
+            return self._merge_control_read(read_result, key, value)
+        except Exception:
+            self._control_expectations.pop(key, None)
+            raise
 
     def async_apply_mqtt_payload(self, payload):
         """Merge one original-format dmgr.notifyFIIDS push into HA state."""
@@ -465,3 +216,143 @@ class LeelenCoordinator(DataUpdateCoordinator):
 
         if changed:
             self.async_set_updated_data(self._data)
+
+    @staticmethod
+    def _build_state_reads(devices):
+        reads = []
+        for device in devices:
+            did = device.get("dev_addr")
+            direct_did = device.get("direct_did")
+            if not did or not direct_did:
+                continue
+            for service in device.get("logic_srv") or []:
+                fiids = SERVICE_FIIDS.get(service.get("service_type"))
+                siid = service.get("siid")
+                if not fiids or siid is None:
+                    continue
+                reads.append(
+                    {
+                        "did": did,
+                        "siid": siid,
+                        "directDid": direct_did,
+                        "fiids": list(fiids),
+                        "isRealDate": 1,
+                    }
+                )
+        return reads
+
+    def _state_index(self, response):
+        states = dict(self._data.get("states", {}))
+        state_times = dict(self._data.get("state_times", {}))
+        self._merge_state_response(response, states, state_times)
+        return states, state_times
+
+    def _merge_control_read(self, response, key, expected):
+        if response.get("result") != 1:
+            return False
+        states = self._data.setdefault("states", {})
+        state_times = self._data.setdefault("state_times", {})
+        changed = self._merge_state_response(
+            response,
+            states,
+            state_times,
+        )
+        confirmed = self._value_matches(states.get(key), expected)
+        if changed:
+            self.async_set_updated_data(self._data)
+        return confirmed
+
+    def _merge_state_response(self, response, states, state_times):
+        if response.get("result") != 1:
+            return False
+        changed = False
+        for item in response.get("params") or []:
+            did = item.get("did")
+            siid = item.get("siid")
+            for fiid_data in item.get("fiids") or []:
+                fiid = fiid_data.get("fiid")
+                if did is None or siid is None or fiid is None:
+                    continue
+                changed = self._accept_state_value(
+                    states,
+                    state_times,
+                    (did, siid, fiid),
+                    fiid_data.get("value"),
+                    fiid_data.get("time"),
+                ) or changed
+        return changed
+
+    def _begin_control(self, key, expected):
+        self._control_expectations[key] = {
+            "expected": dict(expected),
+            "confirmed": False,
+            "deadline": monotonic() + CONTROL_PENDING_SECONDS,
+            "event": asyncio.Event(),
+        }
+
+    async def _wait_for_control(self, key, timeout):
+        expectation = self._control_expectations.get(key)
+        if expectation is None:
+            return False
+        if expectation["confirmed"]:
+            return True
+        if timeout <= 0:
+            return False
+        try:
+            await asyncio.wait_for(expectation["event"].wait(), timeout)
+        except TimeoutError:
+            return False
+        return True
+
+    def _accept_state_value(
+        self,
+        states,
+        state_times,
+        key,
+        value,
+        state_time,
+    ):
+        previous_time = state_times.get(key)
+        if self._is_older(state_time, previous_time):
+            return False
+
+        previous_value = states.get(key)
+        if isinstance(previous_value, dict) and isinstance(value, dict):
+            value = {**previous_value, **value}
+
+        expectation = self._control_expectations.get(key)
+        now = monotonic()
+        if expectation is not None:
+            if self._value_matches(value, expectation["expected"]):
+                if not expectation["confirmed"]:
+                    expectation["confirmed"] = True
+                    expectation["deadline"] = (
+                        now + CONTROL_CONFIRMED_GRACE_SECONDS
+                    )
+                    expectation["event"].set()
+            elif now < expectation["deadline"]:
+                return False
+            else:
+                self._control_expectations.pop(key, None)
+
+        changed = previous_value != value
+        states[key] = value
+        if state_time is not None:
+            state_times[key] = state_time
+        return changed
+
+    @staticmethod
+    def _value_matches(value, expected):
+        return isinstance(value, dict) and all(
+            value.get(field) == expected_value
+            for field, expected_value in expected.items()
+        )
+
+    @staticmethod
+    def _is_older(state_time, previous_time):
+        if state_time is None or previous_time is None:
+            return False
+        try:
+            return float(state_time) < float(previous_time)
+        except (TypeError, ValueError):
+            return False

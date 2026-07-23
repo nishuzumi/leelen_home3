@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 from homeassistant.components.climate import ClimateEntity
@@ -22,8 +21,6 @@ from .device_catalog import (
     extract_temperature,
     iter_platform_services,
 )
-from .leelen.api.HttpApi import HttpApi
-from .leelen.api.protocol import pending_read_delay
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,37 +43,31 @@ HVAC_MODE_MAP = {
 REVERSE_HVAC_MODE_MAP = {v: k for k, v in HVAC_MODE_MAP.items()}
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
-    devices = hass.data[DOMAIN].get('devices', {}).get(entry.entry_id, [])
-    coordinator = (
-        hass.data[DOMAIN].get(entry.entry_id, {}).get("coordinator")
-    )
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities,
+):
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    coordinator = runtime["coordinator"]
     entities = []
 
-    for device, logic_srv in iter_platform_services(devices, "climate"):
-        direct_did = device.get("direct_did")
-        siid = logic_srv.get("siid")
+    for device, logic_srv in iter_platform_services(
+        coordinator.get_devices(),
+        "climate",
+    ):
         entity_class = (
             LeelenClimate
-            if logic_srv.get("service_type") == SERVICE_TYPE_CENTRAL_AIR_CONDITIONER
+            if logic_srv.get("service_type")
+            == SERVICE_TYPE_CENTRAL_AIR_CONDITIONER
             else LeelenHeater
         )
-        entities.append(
-            entity_class(
-                hass,
-                entry,
-                device,
-                logic_srv,
-                siid,
-                direct_did,
-                coordinator,
-            )
-        )
+        entities.append(entity_class(device, logic_srv, coordinator))
     async_add_entities(entities)
 
 
-
 class LeelenClimate(ClimateEntity):
+    _attr_should_poll = False
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_min_temp = 5
     _attr_max_temp = 35
@@ -88,25 +79,20 @@ class LeelenClimate(ClimateEntity):
         HVACMode.FAN_ONLY,
         HVACMode.DRY,
     ]
-    _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.FAN_MODE  | ClimateEntityFeature.TURN_OFF | ClimateEntityFeature.TURN_ON
-    def __init__(
-        self,
-        hass,
-        entry,
-        device,
-        logic_srv,
-        siid,
-        direct_did,
-        coordinator=None,
-    ):
-        self._hass = hass
-        self._entry = entry
+    _attr_supported_features = (
+        ClimateEntityFeature.TARGET_TEMPERATURE
+        | ClimateEntityFeature.FAN_MODE
+        | ClimateEntityFeature.TURN_OFF
+        | ClimateEntityFeature.TURN_ON
+    )
+
+    def __init__(self, device, logic_srv, coordinator):
         self._device = device
         self._logic_srv = logic_srv
-        self._did = device.get("dev_addr")
-        self._direct_did = direct_did
         self._coordinator = coordinator
-        self._siid = siid
+        self._did = device.get("dev_addr")
+        self._direct_did = device.get("direct_did")
+        self._siid = logic_srv.get("siid")
         self._name = logic_srv.get("logic_name", "Air Conditioner")
         self._service_type = logic_srv.get("service_type")
         self._fiid = (
@@ -114,17 +100,20 @@ class LeelenClimate(ClimateEntity):
             if self._service_type == SERVICE_TYPE_CENTRAL_AIR_CONDITIONER
             else FIID_HEATER
         )
+
         self._current_temperature = None
         self._current_humidity = None
         self._target_temperature = 26
         self._hvac_mode = HVACMode.OFF
-        
         self._fan_mode = FAN_MEDIUM
         self._raw_wind_speed = None
         self._on_off = False
-        self._attr_should_poll = coordinator is None
 
-        self._attr_unique_id = entity_unique_id(device, logic_srv, "climate")
+        self._attr_unique_id = entity_unique_id(
+            device,
+            logic_srv,
+            "climate",
+        )
         self._apply_coordinator_state()
 
     @property
@@ -176,29 +165,30 @@ class LeelenClimate(ClimateEntity):
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
-        if self._coordinator is not None:
-            self.async_on_remove(
-                self._coordinator.async_add_listener(
-                    self._handle_coordinator_update
-                )
+        self.async_on_remove(
+            self._coordinator.async_add_listener(
+                self._handle_coordinator_update
             )
+        )
 
     def _handle_coordinator_update(self):
         self._apply_coordinator_state()
         self.async_write_ha_state()
 
     async def async_set_temperature(self, **kwargs):
-        if kwargs.get("temperature") is not None:
-            if self._service_type == SERVICE_TYPE_CENTRAL_AIR_CONDITIONER:
-                await self._send_control(
-                    {
-                        "setTemp": int(kwargs["temperature"]),
-                        "onOff": 1,
-                    }
-                )
-            else:
-                self._target_temperature = kwargs["temperature"]
-                await self._send_control(self._complete_control_value())
+        temperature = kwargs.get("temperature")
+        if temperature is None:
+            return
+        if self._service_type == SERVICE_TYPE_CENTRAL_AIR_CONDITIONER:
+            value = {
+                "setTemp": int(temperature),
+                "onOff": 1,
+            }
+        else:
+            value = self._complete_control_value(
+                target_temperature=temperature,
+            )
+        await self._send_control(value)
 
     async def async_set_hvac_mode(self, hvac_mode):
         if self._service_type == SERVICE_TYPE_CENTRAL_AIR_CONDITIONER:
@@ -210,14 +200,10 @@ class LeelenClimate(ClimateEntity):
                     "onOff": 1,
                 }
         else:
-            if hvac_mode == HVACMode.OFF:
-                self._on_off = False
-                self._hvac_mode = HVACMode.OFF
-            else:
-                self._on_off = True
-                self._hvac_mode = hvac_mode
-            value = self._complete_control_value()
-
+            value = self._complete_control_value(
+                on_off=hvac_mode != HVACMode.OFF,
+                hvac_mode=hvac_mode,
+            )
         await self._send_control(value)
 
     async def async_set_fan_mode(self, fan_mode):
@@ -231,12 +217,25 @@ class LeelenClimate(ClimateEntity):
             }
         )
 
-    def _complete_control_value(self):
+    def _complete_control_value(
+        self,
+        *,
+        on_off=None,
+        hvac_mode=None,
+        target_temperature=None,
+    ):
         """Keep the existing floor-heating request shape unchanged."""
+        if on_off is None:
+            on_off = self._on_off
+        if hvac_mode is None:
+            hvac_mode = self._hvac_mode
+        if target_temperature is None:
+            target_temperature = self._target_temperature
+
         value = {
-            "onOff": 1 if self._on_off else 0,
-            "mode": REVERSE_HVAC_MODE_MAP.get(self._hvac_mode, 0),
-            "setTemp": int(self._target_temperature),
+            "onOff": 1 if on_off else 0,
+            "mode": REVERSE_HVAC_MODE_MAP.get(hvac_mode, 0),
+            "setTemp": int(target_temperature),
         }
         wind_speed = next(
             (
@@ -251,110 +250,24 @@ class LeelenClimate(ClimateEntity):
         return value
 
     async def _send_control(self, value):
-        coordinator = self._coordinator
-        if coordinator is not None:
-            coordinator.expect_fiid_value(
-                self._did,
-                self._siid,
-                self._fiid,
-                value,
-            )
-
         try:
-            api = HttpApi.get_instance(self._hass)
-            result = await api.encrypt_v1_ctrl_fiids(
-                siid=self._siid,
-                direct_did=self._direct_did,
-                fiids=[{"fiid": self._fiid, "value": value}],
+            confirmed = await self._coordinator.async_control_fiid(
                 did=self._did,
+                direct_did=self._direct_did,
+                siid=self._siid,
+                fiid=self._fiid,
+                value=value,
             )
-            if result.get("result") != 1:
-                if coordinator is not None:
-                    coordinator.clear_fiid_expectation(
-                        self._did,
-                        self._siid,
-                        self._fiid,
-                    )
-                return
-
-            retry_delay = pending_read_delay(result)
-            if coordinator is not None:
-                if retry_delay is not None:
-                    confirmed = await coordinator.async_wait_for_fiid_value(
-                        self._did,
-                        self._siid,
-                        self._fiid,
-                        retry_delay,
-                    )
-                    if confirmed:
-                        return
-                await self._confirm_control(api, coordinator, value)
-            else:
-                if retry_delay is not None:
-                    await asyncio.sleep(retry_delay)
-                await self.async_update()
-        except Exception as e:
-            if coordinator is not None:
-                coordinator.clear_fiid_expectation(
+            if not confirmed:
+                _LOGGER.debug(
+                    "设备尚未确认暖通控制: did=%s siid=%s",
                     self._did,
                     self._siid,
-                    self._fiid,
                 )
-            _LOGGER.error(f"控制空调失败: {e}")
-
-    async def _confirm_control(self, api, coordinator, expected):
-        """Apply state only after the detailed device read confirms the command."""
-        result = await api.read_dids_fiids(
-            did=self._did,
-            direct_did=self._direct_did,
-            fiids=[self._fiid, FIID_CURRENT_TEMPERATURE],
-            siid=self._siid,
-            is_real_date=1,
-        )
-        if result.get("result") != 1:
-            return
-
-        params = result.get("params") or []
-        if not params:
-            return
-        fiid_data = {
-            item.get("fiid"): item
-            for item in (params[0].get("fiids") or [])
-            if item.get("fiid") is not None
-        }
-        state_item = fiid_data.get(self._fiid, {})
-        state = state_item.get("value")
-        if not coordinator._value_matches(state, expected):
-            _LOGGER.debug(
-                "空调控制等待设备确认: did=%s siid=%s expected=%s",
-                self._did,
-                self._siid,
-                expected,
-            )
-            return
-
-        coordinator.confirm_fiid_value(
-            self._did,
-            self._siid,
-            self._fiid,
-            state,
-            state_item.get("time"),
-        )
-        temperature_item = fiid_data.get(FIID_CURRENT_TEMPERATURE, {})
-        current_temperature = temperature_item.get("value")
-        if current_temperature is not None:
-            coordinator.confirm_fiid_value(
-                self._did,
-                self._siid,
-                FIID_CURRENT_TEMPERATURE,
-                current_temperature,
-                temperature_item.get("time"),
-            )
-        coordinator.async_notify_state()
+        except Exception as exc:
+            _LOGGER.error("控制暖通设备失败: %s", exc)
 
     def _apply_coordinator_state(self):
-        if self._coordinator is None:
-            return
         values = {
             self._fiid: self._coordinator.get_fiid_value(
                 self._did,
@@ -380,13 +293,16 @@ class LeelenClimate(ClimateEntity):
             self._current_humidity = current_humidity
 
     def _apply_values(self, values):
-        value = values.get(self._fiid, {})
+        value = values.get(self._fiid)
         if isinstance(value, dict):
-            self._on_off = value.get("onOff", 0) == 1
-            self._target_temperature = value.get("setTemp", 26)
-            if value.get("mode") is not None:
+            if "onOff" in value:
+                self._on_off = value["onOff"] == 1
+            if "setTemp" in value:
+                self._target_temperature = value["setTemp"]
+            if "mode" in value:
                 self._hvac_mode = HVAC_MODE_MAP.get(
-                    value.get("mode"), HVACMode.OFF
+                    value["mode"],
+                    HVACMode.OFF,
                 )
 
             if not self._on_off:
@@ -397,12 +313,10 @@ class LeelenClimate(ClimateEntity):
             ):
                 self._hvac_mode = HVACMode.HEAT
 
-            wind_speed = value.get("windSpeed")
-            self._raw_wind_speed = wind_speed
-            if wind_speed in FAN_MODES:
-                self._fan_mode = FAN_MODES[wind_speed]
-            elif wind_speed is not None:
-                self._fan_mode = None
+            if "windSpeed" in value:
+                wind_speed = value["windSpeed"]
+                self._raw_wind_speed = wind_speed
+                self._fan_mode = FAN_MODES.get(wind_speed)
 
         current_temperature = extract_temperature(
             values.get(FIID_CURRENT_TEMPERATURE)
@@ -410,29 +324,11 @@ class LeelenClimate(ClimateEntity):
         if current_temperature is not None:
             self._current_temperature = current_temperature
 
-    async def async_update(self):
-        try:
-            result = await HttpApi.get_instance(self._hass).read_dids_fiids(
-                did=self._did,
-                direct_did=self._direct_did,
-                fiids=[self._fiid, FIID_CURRENT_TEMPERATURE],
-                siid=self._siid,
-                is_real_date=1,
-            )
-            if result.get("result") == 1:
-                params = result.get("params", [])
-                if params:
-                    fiids_data = params[0].get("fiids", [])
-                    values = {
-                        item.get("fiid"): item.get("value")
-                        for item in fiids_data
-                        if item.get("fiid") is not None
-                    }
-                    self._apply_values(values)
-        except Exception as e:
-            _LOGGER.error(f"更新空调状态失败: {e}")
-
 
 class LeelenHeater(LeelenClimate):
     _attr_hvac_modes = [HVACMode.HEAT, HVACMode.OFF]
-    _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE  | ClimateEntityFeature.TURN_OFF | ClimateEntityFeature.TURN_ON
+    _attr_supported_features = (
+        ClimateEntityFeature.TARGET_TEMPERATURE
+        | ClimateEntityFeature.TURN_OFF
+        | ClimateEntityFeature.TURN_ON
+    )
